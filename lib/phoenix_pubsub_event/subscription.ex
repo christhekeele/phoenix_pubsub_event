@@ -1,4 +1,6 @@
-defprotocol PhoenixPubSubEvent.Source.Subscription do
+alias PhoenixPubSubEvent, as: Event
+
+defprotocol PhoenixPubSubEvent.Subscription do
   @moduledoc """
   Protocol for generating an event topic for subscribing to arbitrary values.
 
@@ -15,7 +17,7 @@ defprotocol PhoenixPubSubEvent.Source.Subscription do
 
   alias PhoenixPubSubEvent, as: Event
 
-  defimpl Event.Source.Subscription, for: Entity do
+  defimpl Event.Subscription, for: Entity do
     def for(entity) do
       "\#{Entity}:\#{entity.id}:\#{entity.status}"
     end
@@ -23,7 +25,7 @@ defprotocol PhoenixPubSubEvent.Source.Subscription do
 
   entity = %Entity{id: "entity_id", name: "entity_name", status: "entity_status"}
 
-  Event.Source.subscription!(entity)
+  Event.subscription!(entity)
   #=> "Elixir.Entity:entity_id:entity_status"
   ```
 
@@ -39,7 +41,7 @@ defprotocol PhoenixPubSubEvent.Source.Subscription do
 
   alias PhoenixPubSubEvent, as: Event
 
-  defimpl Event.Source.Subject, for: Entity do
+  defimpl Event.Subject, for: Entity do
     def for(entity) do
       {Entity, entity.id, entity.status}
     end
@@ -47,14 +49,14 @@ defprotocol PhoenixPubSubEvent.Source.Subscription do
 
   entity = %Entity{id: "entity_id", name: "entity_name", status: "entity_status"}
 
-  entity |> Event.Source.subscription!()
+  entity |> Event.subscription!()
   #=> "Elixir.Entity:entity_id:entity_status"
-  entity |> Event.Source.Subject.for() |> Event.Source.subscription()
+  entity |> Event.Subject.for() |> Event.subscription()
   #=> "Elixir.Entity:entity_id:entity_status"
   ```
 
   By default, the subscription for an event source is just the last topic returned
-  by `PhoenixPubSubEvent.Source.Topics.for/1`, assuming it is the most specific topic,
+  by `PhoenixPubSubEvent.Topics.for/1`, assuming it is the most specific topic,
   so you can also customize the subscription topic for an event source by simply
   implementing that protocol instead, ensuring your subscription topic is last.
 
@@ -71,13 +73,21 @@ defprotocol PhoenixPubSubEvent.Source.Subscription do
   def for(value)
 end
 
-alias PhoenixPubSubEvent, as: Event
-
-defimpl Event.Source.Subscription, for: Any do
+# Catch-all: the only way to implement a protocol for generic structs,
+#   instead of just specific ones, is to implement Any and match on __struct__.
+# This still allows individual structs to override with their own defimpl.
+defimpl Event.Subscription, for: Any do
   @spec for(term()) :: Event.topic() | nil
-  def for(other) do
-    other
-    |> Event.Source.Topics.for()
+  def for(value) do
+    # By default, just consult the list of topics, and pick the last one
+    #   as the primary topic to subscribe to, under the convention that topics
+    #   later in the topics list are more specific.
+    value
+    |> Event.Topics.for()
     |> List.last()
+  rescue
+    Event.Error ->
+      # Return `nil` if `value` is not subscribable.
+      nil
   end
 end

@@ -1,4 +1,8 @@
-defprotocol PhoenixPubSubEvent.Source.Topics do
+alias PhoenixPubSubEvent, as: Event
+
+require Event
+
+defprotocol PhoenixPubSubEvent.Topics do
   @moduledoc """
   Protocol for generating event topics to publish to from arbitrary values.
 
@@ -15,7 +19,7 @@ defprotocol PhoenixPubSubEvent.Source.Topics do
 
   alias PhoenixPubSubEvent, as: Event
 
-  defimpl Event.Source.Topics, for: Entity do
+  defimpl Event.Topics, for: Entity do
     def for(entity) do
       [
         "\#{Entity}",
@@ -27,7 +31,7 @@ defprotocol PhoenixPubSubEvent.Source.Topics do
 
   entity = %Entity{id: "entity_id", name: "entity_name", status: "entity_status"}
 
-  Event.Source.topics!(entity)
+  Event.topics!(entity)
   #=> ["Elixir.Entity", "Elixir.Entity:entity_id", "Elixir.Entity:entity_id:entity_status"]
   ```
 
@@ -43,7 +47,7 @@ defprotocol PhoenixPubSubEvent.Source.Topics do
 
   alias PhoenixPubSubEvent, as: Event
 
-  defimpl Event.Source.Subject, for: Entity do
+  defimpl Event.Subject, for: Entity do
     def for(entity) do
       {Entity, entity.id, entity.status}
     end
@@ -51,9 +55,9 @@ defprotocol PhoenixPubSubEvent.Source.Topics do
 
   entity = %Entity{id: "entity_id", name: "entity_name", status: "entity_status"}
 
-  entity |> Event.Source.topics!()
+  entity |> Event.topics!()
   #=> "Elixir.Entity:entity_id:entity_status"
-  entity |> Event.Source.Subject.for() |> Event.Source.topics!()
+  entity |> Event.Subject.for() |> Event.topics!()
   #=> "Elixir.Entity:entity_id:entity_status"
   ```
 
@@ -70,62 +74,81 @@ defprotocol PhoenixPubSubEvent.Source.Topics do
   def for(value)
 end
 
-alias PhoenixPubSubEvent, as: Event
-require Event
-
-defimpl Event.Source.Topics, for: Atom do
+# Atoms can become topics via stringification.
+defimpl Event.Topics, for: Atom do
   @spec for(atom()) :: [Event.topic()]
   def for(atom) do
     [Atom.to_string(atom)]
   end
 end
 
-defimpl Event.Source.Topics, for: BitString do
+# Bitstrings can become topics if they are binaries.
+defimpl Event.Topics, for: BitString do
+  # Binaries (bitstring size 8) are already topics
   @spec for(binary()) :: [Event.topic()]
   def for(binary) when is_binary(binary) do
     [binary]
   end
 
+  # bitstrings with size other than 8 error
   @spec for(bitstring()) :: no_return()
   def for(other) do
     raise Event.Error, message: "cannot convert to topics: #{inspect(other)}"
   end
 end
 
-defimpl Event.Source.Topics, for: Integer do
-  @spec for(integer()) :: [Event.topic()]
-  def for(integer) when is_integer(integer) do
-    [inspect(integer)]
-  end
-end
-
-defimpl Event.Source.Topics, for: PID do
-  @spec for(pid()) :: [Event.topic()]
-  def for(pid) when is_pid(pid) do
-    [inspect(pid)]
-  end
-end
-
-defimpl Event.Source.Topics, for: Reference do
-  @spec for(reference()) :: [Event.topic()]
-  def for(reference) when is_reference(reference) do
-    [inspect(reference)]
-  end
-end
-
-defimpl Event.Source.Topics, for: Tuple do
+# Tuples become a hierarchy of increasingly specific topics.
+defimpl Event.Topics, for: Tuple do
   @spec for(tuple()) :: [Event.topic()]
   def for(tuple) do
     tuple
     |> Tuple.to_list()
     |> Enum.reject(&is_nil/1)
+    |> Enum.map(&topic_component_to_string/1)
     |> topics_hierarchy()
     |> Enum.map(&Enum.join(&1, ":"))
   end
 
+  defp topic_component_to_string(value)
+
+  # Atoms can be a component of a topic
+  defp topic_component_to_string(atom) when is_atom(atom) do
+    Atom.to_string(atom)
+  end
+
+  # Arbitrary strings can be a component of a topic
+  defp topic_component_to_string(binary) when is_binary(binary) do
+    binary
+  end
+
+  # IDs can be integers, which can be a component of a topic
+  defp topic_component_to_string(integer) when is_integer(integer) do
+    inspect(integer)
+  end
+
+  # IDs can be pids, which can be a component of a topic
+  defp topic_component_to_string(pid) when is_pid(pid) do
+    inspect(pid)
+  end
+
+  # IDs can be references, which can be a component of a topic
+  defp topic_component_to_string(reference) when is_reference(reference) do
+    inspect(reference)
+  end
+
+  # Anything else should raise
+  defp topic_component_to_string(other) do
+    raise Event.Error, message: "cannot convert to topic component: #{inspect(other)}"
+  end
+
+  # Converts a list of topic components, ex. `["foo", "bar", "baz"]
+  #   to a nested hierarchy, ex: [
+  #     ["foo"],
+  #     ["foo", "bar"],
+  #     ["foo", "bar", "baz"],
+  #   ]
   defp topics_hierarchy(list) do
     list
-    |> Enum.flat_map(&Event.Source.Topics.for/1)
     |> :lists.reverse()
     |> do_topics_hierarchy([])
   end
@@ -140,22 +163,15 @@ defimpl Event.Source.Topics, for: Tuple do
   end
 end
 
-defimpl Event.Source.Topics, for: List do
-  @spec for([term()]) :: [Event.topic()]
-  def for(list) when is_list(list) do
-    list
-    |> Enum.flat_map(&Event.Source.Topics.for/1)
-    |> Enum.uniq()
-  end
-end
-
-defimpl Event.Source.Topics, for: Any do
+# Catch-all: the only way to implement a protocol for generic structs,
+#   instead of just specific ones, is to implement Any and match on __struct__.
+# This still allows individual structs to override with their own defimpl.
+defimpl Event.Topics, for: Any do
   @spec for(%{__struct__: module(), id: Event.id()}) :: [Event.topic()]
-  def for(%{__struct__: _module, id: id} = struct)
-      when is_struct(struct) and Event.is_id(id) do
+  def for(%{__struct__: _module, id: id} = struct) when is_struct(struct) and Event.is_id(id) do
     struct
-    |> Event.Source.Subject.for()
-    |> Event.Source.Topics.for()
+    |> Event.Subject.for()
+    |> Event.Topics.for()
   end
 
   @spec for(term()) :: no_return()
